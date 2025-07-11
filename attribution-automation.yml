@@ -33,8 +33,8 @@ on:
       - '.github/workflows/**'
 
 env:
-  NETLIFY_URL: ${{ secrets.NETLIFY_URL }}
-  OJOY_API_KEY: ${{ secrets.OJOY_API_KEY }}
+  NETLIFY_URL: https://trackingojoy.netlify.app
+  OJOY_API_KEY: ojoy_track_2025_secure_key_v1
 
 jobs:
   # Job 1: Health Check
@@ -261,8 +261,8 @@ jobs:
           echo "  - Attribution Recovery: ${{ needs.attribution-recovery.result }}"
           echo ""
           echo "🔗 System URLs:"
-          echo "  - Dashboard: ${{ env.NETLIFY_URL }}/dashboard.html"
-          echo "  - Analytics API: ${{ env.NETLIFY_URL }}/.netlify/functions/analytics-flexible"
+          echo "  - Dashboard: https://trackingojoy.netlify.app/dashboard.html"
+          echo "  - Analytics API: https://trackingojoy.netlify.app/.netlify/functions/analytics-flexible"
           echo "=================================="
 
   # Job 7: Notifications (Optional)
@@ -280,7 +280,7 @@ jobs:
           echo "Workflow status: ${{ job.status }}"
           echo "Trigger: ${{ github.event_name }}"
           
-          # Example: Send to Slack webhook (uncomment and configure)
+          # Example: Send to Slack webhook (configure SLACK_WEBHOOK_URL if needed)
           # curl -X POST -H 'Content-type: application/json' \
           #   --data '{"text":"Attribution System Status: ${{ job.status }}"}' \
-          #   ${{ secrets.SLACK_WEBHOOK_URL }}
+          #   YOUR_SLACK_WEBHOOK_URL
