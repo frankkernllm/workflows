@@ -1,0 +1,286 @@
+# Complete GitHub Actions Workflow for Customer Journey Attribution System
+# File: .github/workflows/attribution-automation.yml
+
+name: Customer Journey Attribution Automation
+
+on:
+  # Manual trigger
+  workflow_dispatch:
+    inputs:
+      force_restart:
+        description: 'Force restart extraction from beginning'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
+      
+  # Automated schedules
+  schedule:
+    # Extract new data every hour at :05 minutes
+    - cron: '5 * * * *'
+    # Complete extraction daily at 2 AM
+    - cron: '0 2 * * *'
+    # Process conversions every 30 minutes
+    - cron: '*/30 * * * *'
+
+  # Trigger on pushes to main (optional)
+  push:
+    branches: [ main ]
+    paths:
+      - 'netlify/functions/**'
+      - '.github/workflows/**'
+
+env:
+  NETLIFY_URL: ${{ secrets.NETLIFY_URL }}
+  OJOY_API_KEY: ${{ secrets.OJOY_API_KEY }}
+
+jobs:
+  # Job 1: Health Check
+  health-check:
+    name: System Health Check
+    runs-on: ubuntu-latest
+    outputs:
+      system-healthy: ${{ steps.health.outputs.healthy }}
+    
+    steps:
+      - name: Check System Health
+        id: health
+        run: |
+          echo "🏥 Checking system health..."
+          
+          # Test basic connectivity
+          response=$(curl -s -o /dev/null -w "%{http_code}" \
+            "${{ env.NETLIFY_URL }}/.netlify/functions/analytics-flexible?start_date=$(date -d '1 day ago' +%Y-%m-%d)&end_date=$(date +%Y-%m-%d)" \
+            -H "X-API-Key: ${{ env.OJOY_API_KEY }}")
+          
+          if [ "$response" = "200" ]; then
+            echo "✅ System is healthy"
+            echo "healthy=true" >> $GITHUB_OUTPUT
+          else
+            echo "❌ System health check failed (HTTP $response)"
+            echo "healthy=false" >> $GITHUB_OUTPUT
+          fi
+
+  # Job 2: Data Extraction
+  data-extraction:
+    name: Automated Data Extraction
+    runs-on: ubuntu-latest
+    needs: health-check
+    if: needs.health-check.outputs.system-healthy == 'true'
+    outputs:
+      extraction-complete: ${{ steps.extract.outputs.complete }}
+      total-pageviews: ${{ steps.extract.outputs.pageviews }}
+    
+    steps:
+      - name: Run Auto Chunked Extraction
+        id: extract
+        run: |
+          echo "🚀 Starting automated chunked extraction..."
+          
+          # Prepare request body
+          if [ "${{ github.event.inputs.force_restart }}" = "true" ]; then
+            echo "🔄 Force restarting extraction..."
+            request_body='{"force_restart": true}'
+          else
+            echo "📍 Resuming extraction from last position..."
+            request_body='{}'
+          fi
+          
+          # Run extraction
+          response=$(curl -s -X POST "${{ env.NETLIFY_URL }}/.netlify/functions/auto-chunked-extractor" \
+            -H "Content-Type: application/json" \
+            -H "X-API-Key: ${{ env.OJOY_API_KEY }}" \
+            -d "$request_body")
+          
+          echo "📋 Extraction response:"
+          echo "$response" | jq '.'
+          
+          # Parse results
+          status=$(echo "$response" | jq -r '.status // "UNKNOWN"')
+          pageviews=$(echo "$response" | jq -r '.extraction_summary.total_pageviews_extracted // 0')
+          complete=$(echo "$response" | jq -r '.extraction_summary.extraction_complete // false')
+          
+          echo "📊 Extraction Status: $status"
+          echo "📄 Total Pageviews: $pageviews" 
+          echo "✅ Complete: $complete"
+          
+          # Set outputs
+          echo "complete=$complete" >> $GITHUB_OUTPUT
+          echo "pageviews=$pageviews" >> $GITHUB_OUTPUT
+          echo "status=$status" >> $GITHUB_OUTPUT
+          
+          # Continue extraction if partial
+          if [ "$status" = "PARTIAL" ]; then
+            echo "🔄 Extraction partial, attempting to continue..."
+            
+            continue_cmd=$(echo "$response" | jq -r '.continue_command.curl // ""')
+            if [ -n "$continue_cmd" ] && [ "$continue_cmd" != "null" ]; then
+              echo "Running continue command..."
+              eval "$continue_cmd"
+            fi
+          fi
+
+      - name: Verify Extraction Results
+        if: steps.extract.outputs.complete == 'true'
+        run: |
+          echo "🎉 Extraction completed successfully!"
+          echo "📊 Total pageviews extracted: ${{ steps.extract.outputs.pageviews }}"
+
+  # Job 3: Index Building
+  build-indexes:
+    name: Build Search Indexes
+    runs-on: ubuntu-latest
+    needs: data-extraction
+    if: needs.data-extraction.outputs.extraction-complete == 'true'
+    
+    steps:
+      - name: Build Complete Indexes
+        run: |
+          echo "🏗️ Building search indexes from extracted data..."
+          
+          response=$(curl -s -X POST "${{ env.NETLIFY_URL }}/.netlify/functions/build-indexes-complete" \
+            -H "Content-Type: application/json")
+          
+          echo "📋 Index building response:"
+          echo "$response" | jq '.'
+          
+          success=$(echo "$response" | jq -r '.success // false')
+          ip_indexes=$(echo "$response" | jq -r '.complete_indexing_summary.ip_indexes_created // 0')
+          unique_ips=$(echo "$response" | jq -r '.complete_indexing_summary.unique_ips_found // 0')
+          
+          if [ "$success" = "true" ]; then
+            echo "✅ Indexes built successfully!"
+            echo "🌐 IP indexes created: $ip_indexes"
+            echo "🔢 Unique IPs found: $unique_ips"
+          else
+            echo "❌ Index building failed"
+            exit 1
+          fi
+
+  # Job 4: Conversion Processing
+  process-conversions:
+    name: Process Unattributed Conversions
+    runs-on: ubuntu-latest
+    needs: [health-check, build-indexes]
+    if: always() && needs.health-check.outputs.system-healthy == 'true'
+    
+    steps:
+      - name: Process Conversions
+        run: |
+          echo "💰 Processing unattributed conversions..."
+          
+          # Run conversion processing (processes one conversion per call)
+          for attempt in {1..5}; do
+            echo "🔄 Processing attempt $attempt..."
+            
+            response=$(curl -s -X POST "${{ env.NETLIFY_URL }}/.netlify/functions/process-conversions-v2")
+            
+            echo "📋 Processing response:"
+            echo "$response" | jq '.'
+            
+            status=$(echo "$response" | jq -r '.progress.status // "UNKNOWN"')
+            remaining=$(echo "$response" | jq -r '.progress.unattributed_remaining // 0')
+            
+            echo "📊 Status: $status, Remaining: $remaining"
+            
+            if [ "$status" = "ALL_PROCESSED_V2" ] || [ "$remaining" = "0" ]; then
+              echo "🎉 All conversions processed!"
+              break
+            fi
+            
+            # Small delay between attempts
+            sleep 10
+          done
+
+  # Job 5: Attribution Recovery
+  attribution-recovery:
+    name: Attribution Recovery
+    runs-on: ubuntu-latest
+    needs: [process-conversions]
+    if: always() && needs.health-check.outputs.system-healthy == 'true'
+    
+    steps:
+      - name: Run Attribution Recovery
+        run: |
+          echo "🎯 Running attribution recovery for recent conversions..."
+          
+          response=$(curl -s -X POST "${{ env.NETLIFY_URL }}/.netlify/functions/auto-attribution-recovery" \
+            -H "Content-Type: application/json" \
+            -H "X-API-Key: ${{ env.OJOY_API_KEY }}" \
+            -d '{"hours_back": 24}')
+          
+          echo "📋 Recovery response:"
+          echo "$response" | jq '.'
+          
+          success=$(echo "$response" | jq -r '.success // false')
+          attributed=$(echo "$response" | jq -r '.summary.attributed // 0')
+          total_found=$(echo "$response" | jq -r '.summary.total_found // 0')
+          attribution_rate=$(echo "$response" | jq -r '.summary.attribution_rate // 0')
+          
+          echo "📊 Recovery Results:"
+          echo "  - Conversions found: $total_found"
+          echo "  - Successfully attributed: $attributed"
+          echo "  - Attribution rate: $attribution_rate%"
+
+  # Job 6: System Report
+  generate-report:
+    name: Generate System Report
+    runs-on: ubuntu-latest
+    needs: [data-extraction, build-indexes, process-conversions, attribution-recovery]
+    if: always()
+    
+    steps:
+      - name: Generate Summary Report
+        run: |
+          echo "📊 Generating system automation report..."
+          
+          # Get current analytics
+          response=$(curl -s "${{ env.NETLIFY_URL }}/.netlify/functions/analytics-flexible?start_date=$(date -d '7 days ago' +%Y-%m-%d)&end_date=$(date +%Y-%m-%d)" \
+            -H "X-API-Key: ${{ env.OJOY_API_KEY }}")
+          
+          total_conversions=$(echo "$response" | jq -r '.total_conversions // 0')
+          total_pageviews=$(echo "$response" | jq -r '.total_page_views // 0')
+          attribution_rate=$(echo "$response" | jq -r '.conversion_rate // "0.00"')
+          
+          echo "🎯 Attribution System Status Report"
+          echo "=================================="
+          echo "📅 Report Date: $(date)"
+          echo "🔄 Workflow: ${{ github.workflow }}"
+          echo "📊 Data Summary (Last 7 Days):"
+          echo "  - Total Conversions: $total_conversions"
+          echo "  - Total Pageviews: $total_pageviews"
+          echo "  - Attribution Rate: $attribution_rate%"
+          echo ""
+          echo "🚀 Job Results:"
+          echo "  - Health Check: ${{ needs.health-check.result }}"
+          echo "  - Data Extraction: ${{ needs.data-extraction.result }}"
+          echo "  - Index Building: ${{ needs.build-indexes.result }}"
+          echo "  - Conversion Processing: ${{ needs.process-conversions.result }}"
+          echo "  - Attribution Recovery: ${{ needs.attribution-recovery.result }}"
+          echo ""
+          echo "🔗 System URLs:"
+          echo "  - Dashboard: ${{ env.NETLIFY_URL }}/dashboard.html"
+          echo "  - Analytics API: ${{ env.NETLIFY_URL }}/.netlify/functions/analytics-flexible"
+          echo "=================================="
+
+  # Job 7: Notifications (Optional)
+  notify:
+    name: Send Notifications
+    runs-on: ubuntu-latest
+    needs: [generate-report]
+    if: failure() || (success() && github.event_name == 'schedule' && github.event.schedule == '0 2 * * *')
+    
+    steps:
+      - name: Send Status Notification
+        run: |
+          echo "📧 Sending status notification..."
+          echo "This is where you could send Slack/Discord/Email notifications"
+          echo "Workflow status: ${{ job.status }}"
+          echo "Trigger: ${{ github.event_name }}"
+          
+          # Example: Send to Slack webhook (uncomment and configure)
+          # curl -X POST -H 'Content-type: application/json' \
+          #   --data '{"text":"Attribution System Status: ${{ job.status }}"}' \
+          #   ${{ secrets.SLACK_WEBHOOK_URL }}
