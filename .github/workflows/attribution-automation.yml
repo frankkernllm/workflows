@@ -143,53 +143,61 @@ jobs:
               pageview_data=$(echo "$analytics_response" | jq -r '.page_views // []')
             fi
             
-            # Count IPv4 vs IPv6 from actual IP addresses
+            # Count IPv4 vs IPv6 from actual IP addresses (FIXED: simplified approach)
             if [ "$pageview_data" != "[]" ] && [ "$pageview_data" != "null" ]; then
               echo "📊 Analyzing real IP addresses from pageview data..."
               
-              # Extract IP addresses and count IPv4 vs IPv6
-              ip_analysis=$(echo "$pageview_data" | jq -r '
-                map(select(.ip_address != null and .ip_address != "unknown")) |
-                group_by(if (.ip_address | contains(":")) then "ipv6" else "ipv4" end) |
-                map({type: .[0].ip_address | if contains(":") then "ipv6" else "ipv4" end, count: length}) |
-                from_entries
-              ')
+              # Simple approach: extract all valid IP addresses, then count them
+              all_ips=$(echo "$pageview_data" | jq -r '.[] | select(.ip_address != null and .ip_address != "unknown") | .ip_address')
               
-              total_ips=$(echo "$pageview_data" | jq -r 'map(select(.ip_address != null and .ip_address != "unknown")) | length')
-              ipv4_count=$(echo "$ip_analysis" | jq -r '.ipv4 // 0')
-              ipv6_count=$(echo "$ip_analysis" | jq -r '.ipv6 // 0')
-              
-              if [ "$total_ips" -gt 0 ]; then
-                # Calculate percentages
-                ipv4_percentage=$((ipv4_count * 100 / total_ips))
-                ipv6_percentage=$((ipv6_count * 100 / total_ips))
+              if [ -n "$all_ips" ]; then
+                # Count total IPs
+                total_ips=$(echo "$all_ips" | wc -l)
                 
-                # If pageviews were extracted this run, apply the same distribution
-                if [ "$pageviews" -gt 0 ]; then
-                  ipv6_pageviews=$((pageviews * ipv6_percentage / 100))
-                  ipv4_pageviews=$((pageviews - ipv6_pageviews))
-                  echo "  - IPv4 Pageviews (this extraction): $ipv4_pageviews"
-                  echo "  - IPv6 Pageviews (this extraction): $ipv6_pageviews"
+                # Count IPv6 (contains colon) and IPv4 (contains dot, no colon)
+                ipv6_count=$(echo "$all_ips" | grep -c ":" || echo "0")
+                ipv4_count=$(echo "$all_ips" | grep -v ":" | grep -c "\." || echo "0")
+                
+                if [ "$total_ips" -gt 0 ]; then
+                  # Calculate percentages
+                  ipv4_percentage=$((ipv4_count * 100 / total_ips))
+                  ipv6_percentage=$((ipv6_count * 100 / total_ips))
+                  
+                  # If pageviews were extracted this run, apply the same distribution
+                  if [ "$pageviews" -gt 0 ]; then
+                    ipv6_pageviews=$((pageviews * ipv6_percentage / 100))
+                    ipv4_pageviews=$((pageviews - ipv6_pageviews))
+                    echo "  - IPv4 Pageviews (this extraction): $ipv4_pageviews"
+                    echo "  - IPv6 Pageviews (this extraction): $ipv6_pageviews"
+                  else
+                    # No new pageviews extracted, but report the distribution from recent data
+                    ipv4_pageviews=0
+                    ipv6_pageviews=0
+                    echo "  - No new pageviews extracted this run (normal if recently run)"
+                  fi
+                  
+                  echo "📈 Real IPv4/IPv6 Analysis (from actual IP addresses):"
+                  echo "  - Total IPs analyzed: $total_ips"
+                  echo "  - IPv4 addresses: $ipv4_count (${ipv4_percentage}%)"
+                  echo "  - IPv6 addresses: $ipv6_count (${ipv6_percentage}%)"
+                  echo "  - Data source: Real pageview IP addresses (not key patterns)"
+                  
+                  if [ "$ipv6_count" -gt 0 ]; then
+                    echo "🌍 SUCCESS: Real IPv6 traffic detected!"
+                    echo "  - Sample IPv6 IPs found:"
+                    echo "$all_ips" | grep ":" | head -3 | sed 's/^/    /'
+                  else
+                    echo "📍 Only IPv4 traffic found in recent data"
+                    echo "  - Sample IPv4 IPs found:"
+                    echo "$all_ips" | grep -v ":" | head -3 | sed 's/^/    /'
+                  fi
                 else
-                  # No new pageviews extracted, but report the distribution from recent data
-                  ipv4_pageviews=0
+                  echo "⚠️ No valid IP addresses found in recent pageview data"
+                  ipv4_pageviews=$pageviews
                   ipv6_pageviews=0
-                  echo "  - No new pageviews extracted this run (normal if recently run)"
-                fi
-                
-                echo "📈 Real IPv4/IPv6 Analysis (from actual IP addresses):"
-                echo "  - Total IPs analyzed: $total_ips"
-                echo "  - IPv4 addresses: $ipv4_count (${ipv4_percentage}%)"
-                echo "  - IPv6 addresses: $ipv6_count (${ipv6_percentage}%)"
-                echo "  - Data source: Real pageview IP addresses (not key patterns)"
-                
-                if [ "$ipv6_count" -gt 0 ]; then
-                  echo "🌍 SUCCESS: Real IPv6 traffic detected!"
-                else
-                  echo "📍 Only IPv4 traffic found in recent data"
                 fi
               else
-                echo "⚠️ No valid IP addresses found in recent pageview data"
+                echo "⚠️ No IP addresses could be extracted from pageview data"
                 ipv4_pageviews=$pageviews
                 ipv6_pageviews=0
               fi
