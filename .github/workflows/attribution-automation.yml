@@ -249,9 +249,13 @@ jobs:
           echo "🔍 SMART FIX: Verifying extraction results..."
           
           total=${{ steps.extract.outputs.pageviews }}
-          ipv4=${{ steps.extract.outputs.ipv4_pageviews }}
-          ipv6=${{ steps.extract.outputs.ipv6_pageviews }}
+          ipv4="${{ steps.extract.outputs.ipv4_pageviews }}"
+          ipv6="${{ steps.extract.outputs.ipv6_pageviews }}"
           method=${{ steps.extract.outputs.extraction_method }}
+          
+          # Handle empty values gracefully
+          ipv4=${ipv4:-0}
+          ipv6=${ipv6:-0}
           
           echo "📊 Smart Extraction Results:"
           echo "  - Method Used: $method"
@@ -261,7 +265,7 @@ jobs:
           
           if [ "$total" -gt 0 ]; then
             echo "🎉 Successfully extracted $total pageviews using $method!"
-            if [ "$ipv6" -gt 0 ]; then
+            if [ "$ipv6" -gt 0 ] 2>/dev/null; then
               echo "🌍 IPv6 traffic detected! Your system supports both IP versions."
             else
               echo "📍 IPv4 traffic extracted (normal for many websites)"
