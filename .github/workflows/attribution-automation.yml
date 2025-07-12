@@ -37,38 +37,10 @@ env:
   OJOY_API_KEY: ojoy_track_2025_secure_key_v1
 
 jobs:
-  # Job 1: Health Check
-  health-check:
-    name: System Health Check
-    runs-on: ubuntu-latest
-    outputs:
-      system-healthy: ${{ steps.health.outputs.healthy }}
-    
-    steps:
-      - name: Check System Health
-        id: health
-        run: |
-          echo "🏥 Checking system health..."
-          
-          # Test basic connectivity
-          response=$(curl -s -o /dev/null -w "%{http_code}" \
-            "${{ env.NETLIFY_URL }}/.netlify/functions/analytics-flexible?start_date=$(date -d '1 day ago' +%Y-%m-%d)&end_date=$(date +%Y-%m-%d)" \
-            -H "X-API-Key: ${{ env.OJOY_API_KEY }}")
-          
-          if [ "$response" = "200" ]; then
-            echo "✅ System is healthy"
-            echo "healthy=true" >> $GITHUB_OUTPUT
-          else
-            echo "❌ System health check failed (HTTP $response)"
-            echo "healthy=false" >> $GITHUB_OUTPUT
-          fi
-
-  # Job 2: Data Extraction
+  # Job 1: Data Extraction (No Health Check Dependency)
   data-extraction:
     name: Automated Data Extraction
     runs-on: ubuntu-latest
-    needs: health-check
-    if: needs.health-check.outputs.system-healthy == 'true'
     outputs:
       extraction-complete: ${{ steps.extract.outputs.complete }}
       total-pageviews: ${{ steps.extract.outputs.pageviews }}
@@ -128,7 +100,7 @@ jobs:
           echo "🎉 Extraction completed successfully!"
           echo "📊 Total pageviews extracted: ${{ steps.extract.outputs.pageviews }}"
 
-  # Job 3: Index Building
+  # Job 2: Index Building
   build-indexes:
     name: Build Search Indexes
     runs-on: ubuntu-latest
@@ -159,12 +131,43 @@ jobs:
             exit 1
           fi
 
-  # Job 4: Conversion Processing
+  # Job 3: Build Conversion Indexes
+  build-conversion-indexes:
+    name: Build Conversion Indexes
+    runs-on: ubuntu-latest
+    needs: data-extraction
+    if: needs.data-extraction.outputs.extraction-complete == 'true'
+    
+    steps:
+      - name: Build Conversion Date Indexes
+        run: |
+          echo "📅 Building conversion date indexes..."
+          
+          response=$(curl -s -X POST "${{ env.NETLIFY_URL }}/.netlify/functions/extract-conversions-chunked" \
+            -H "Content-Type: application/json")
+          
+          echo "📋 Conversion indexing response:"
+          echo "$response" | jq '.'
+          
+          success=$(echo "$response" | jq -r '.success // false')
+          conversions_loaded=$(echo "$response" | jq -r '.conversion_indexing_summary.conversions_loaded // 0')
+          date_indexes=$(echo "$response" | jq -r '.conversion_indexing_summary.date_indexes_created // 0')
+          
+          if [ "$success" = "true" ]; then
+            echo "✅ Conversion indexes built successfully!"
+            echo "💰 Conversions loaded: $conversions_loaded"
+            echo "📅 Date indexes created: $date_indexes"
+          else
+            echo "❌ Conversion index building failed"
+            exit 1
+          fi
+
+  # Job 4: Conversion Processing (Runs Always)
   process-conversions:
     name: Process Unattributed Conversions
     runs-on: ubuntu-latest
-    needs: [health-check, build-indexes]
-    if: always() && needs.health-check.outputs.system-healthy == 'true'
+    needs: [build-indexes, build-conversion-indexes]
+    if: always()
     
     steps:
       - name: Process Conversions
@@ -194,12 +197,12 @@ jobs:
             sleep 10
           done
 
-  # Job 5: Attribution Recovery
+  # Job 5: Attribution Recovery (Runs Always)
   attribution-recovery:
     name: Attribution Recovery
     runs-on: ubuntu-latest
     needs: [process-conversions]
-    if: always() && needs.health-check.outputs.system-healthy == 'true'
+    if: always()
     
     steps:
       - name: Run Attribution Recovery
@@ -228,7 +231,7 @@ jobs:
   generate-report:
     name: Generate System Report
     runs-on: ubuntu-latest
-    needs: [data-extraction, build-indexes, process-conversions, attribution-recovery]
+    needs: [data-extraction, build-indexes, build-conversion-indexes, process-conversions, attribution-recovery]
     if: always()
     
     steps:
@@ -254,9 +257,9 @@ jobs:
           echo "  - Attribution Rate: $attribution_rate%"
           echo ""
           echo "🚀 Job Results:"
-          echo "  - Health Check: ${{ needs.health-check.result }}"
           echo "  - Data Extraction: ${{ needs.data-extraction.result }}"
           echo "  - Index Building: ${{ needs.build-indexes.result }}"
+          echo "  - Conversion Indexing: ${{ needs.build-conversion-indexes.result }}"
           echo "  - Conversion Processing: ${{ needs.process-conversions.result }}"
           echo "  - Attribution Recovery: ${{ needs.attribution-recovery.result }}"
           echo ""
