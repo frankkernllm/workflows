@@ -127,72 +127,83 @@ jobs:
           echo "  - Success: $success"
           echo "  - Total Pageviews: $pageviews"
           
-          # SMART IPv6 FIX: Always analyze existing data, even if no new pageviews extracted
+          # SMART IPv6 FIX: Analyze actual IP addresses from extracted data
           if [ "$success" = "true" ]; then
-            echo "🔍 Analyzing existing IPv4/IPv6 distribution..."
+            echo "🔍 Analyzing IPv4/IPv6 distribution from actual pageview data..."
             
-            # Use attribution-data-scanner to check for IPv6 patterns in existing data
-            scanner_response=$(curl -s "${{ env.NETLIFY_URL }}/.netlify/functions/attribution-data-scanner" \
-              -H "X-API-Key: ${{ env.OJOY_API_KEY }}")
-            
-            # Count keys that likely contain IPv6 (have many underscores from colon replacement)
-            total_ip_keys=$(echo "$scanner_response" | jq -r '.results.by_pattern["attribution_ip_*"].count // 0')
-            
-            if [ "$total_ip_keys" -gt 0 ]; then
-              # Sample some keys to check for IPv6 patterns (lots of underscores)
-              sample_keys=$(echo "$scanner_response" | jq -r '.results.by_pattern["attribution_ip_*"].samples[]? // empty' | head -10)
-              
-              # Count IPv6-like patterns (attribution_ip_ followed by many underscores)
-              ipv6_like_count=0
-              ipv4_like_count=0
-              
-              while IFS= read -r key; do
-                if [ -n "$key" ]; then
-                  # Count underscores after "attribution_ip_"
-                  underscore_count=$(echo "$key" | grep -o "_" | wc -l)
-                  if [ "$underscore_count" -gt 6 ]; then
-                    ipv6_like_count=$((ipv6_like_count + 1))
-                  else
-                    ipv4_like_count=$((ipv4_like_count + 1))
-                  fi
-                fi
-              done <<< "$sample_keys"
-              
-              # Calculate rough IPv6 percentage from sample
-              total_sample=$((ipv6_like_count + ipv4_like_count))
-              if [ "$total_sample" -gt 0 ]; then
-                ipv6_percentage=$((ipv6_like_count * 100 / total_sample))
-              else
-                ipv6_percentage=0
-              fi
-              
-              # If pageviews were extracted this run, apply percentage
-              if [ "$pageviews" -gt 0 ]; then
-                ipv6_pageviews=$((pageviews * ipv6_percentage / 100))
-                ipv4_pageviews=$((pageviews - ipv6_pageviews))
-                echo "  - IPv4 Pageviews (this extraction): $ipv4_pageviews"
-                echo "  - IPv6 Pageviews (this extraction): $ipv6_pageviews"
-              else
-                # No new pageviews extracted, but we can report existing distribution
-                ipv4_pageviews=0
-                ipv6_pageviews=0
-                echo "  - No new pageviews extracted this run (normal if recently run)"
-                echo "  - Existing data shows IPv6 adoption: ${ipv6_percentage}%"
-              fi
-              
-              echo "  - IPv6 Adoption Rate in existing data: ${ipv6_percentage}%"
-              echo "  - Sample analyzed: $total_sample keys (IPv6-like: $ipv6_like_count, IPv4-like: $ipv4_like_count)"
-              echo "  - Total IP keys in database: $total_ip_keys"
+            # Get actual pageview data with real IP addresses
+            if [ "$extraction_method" = "manual_extractor" ]; then
+              # Manual extractor returns pageviews in extraction_results
+              pageview_data=$(echo "$response" | jq -r '.extraction_results.pageviews // []')
             else
-              # No IP keys found at all
+              # Auto-chunked extractor - get recent pageviews via analytics for IP analysis
+              echo "📊 Getting recent pageviews for IPv4/IPv6 analysis..."
+              analytics_response=$(curl -s "${{ env.NETLIFY_URL }}/.netlify/functions/analytics-flexible?start_date=$(date -d '2 days ago' +%Y-%m-%d)&end_date=$(date +%Y-%m-%d)&limit=500" \
+                -H "X-API-Key: ${{ env.OJOY_API_KEY }}")
+              pageview_data=$(echo "$analytics_response" | jq -r '.page_views // []')
+            fi
+            
+            # Count IPv4 vs IPv6 from actual IP addresses
+            if [ "$pageview_data" != "[]" ] && [ "$pageview_data" != "null" ]; then
+              echo "📊 Analyzing real IP addresses from pageview data..."
+              
+              # Extract IP addresses and count IPv4 vs IPv6
+              ip_analysis=$(echo "$pageview_data" | jq -r '
+                map(select(.ip_address != null and .ip_address != "unknown")) |
+                group_by(if (.ip_address | contains(":")) then "ipv6" else "ipv4" end) |
+                map({type: .[0].ip_address | if contains(":") then "ipv6" else "ipv4" end, count: length}) |
+                from_entries
+              ')
+              
+              total_ips=$(echo "$pageview_data" | jq -r 'map(select(.ip_address != null and .ip_address != "unknown")) | length')
+              ipv4_count=$(echo "$ip_analysis" | jq -r '.ipv4 // 0')
+              ipv6_count=$(echo "$ip_analysis" | jq -r '.ipv6 // 0')
+              
+              if [ "$total_ips" -gt 0 ]; then
+                # Calculate percentages
+                ipv4_percentage=$((ipv4_count * 100 / total_ips))
+                ipv6_percentage=$((ipv6_count * 100 / total_ips))
+                
+                # If pageviews were extracted this run, apply the same distribution
+                if [ "$pageviews" -gt 0 ]; then
+                  ipv6_pageviews=$((pageviews * ipv6_percentage / 100))
+                  ipv4_pageviews=$((pageviews - ipv6_pageviews))
+                  echo "  - IPv4 Pageviews (this extraction): $ipv4_pageviews"
+                  echo "  - IPv6 Pageviews (this extraction): $ipv6_pageviews"
+                else
+                  # No new pageviews extracted, but report the distribution from recent data
+                  ipv4_pageviews=0
+                  ipv6_pageviews=0
+                  echo "  - No new pageviews extracted this run (normal if recently run)"
+                fi
+                
+                echo "📈 Real IPv4/IPv6 Analysis (from actual IP addresses):"
+                echo "  - Total IPs analyzed: $total_ips"
+                echo "  - IPv4 addresses: $ipv4_count (${ipv4_percentage}%)"
+                echo "  - IPv6 addresses: $ipv6_count (${ipv6_percentage}%)"
+                echo "  - Data source: Real pageview IP addresses (not key patterns)"
+                
+                if [ "$ipv6_count" -gt 0 ]; then
+                  echo "🌍 SUCCESS: Real IPv6 traffic detected!"
+                else
+                  echo "📍 Only IPv4 traffic found in recent data"
+                fi
+              else
+                echo "⚠️ No valid IP addresses found in recent pageview data"
+                ipv4_pageviews=$pageviews
+                ipv6_pageviews=0
+              fi
+            else
+              echo "⚠️ No pageview data available for IPv4/IPv6 analysis"
+              # Default assignment
               ipv4_pageviews=$pageviews
               ipv6_pageviews=0
+              
               if [ "$pageviews" -gt 0 ]; then
-                echo "  - IPv4 Pageviews: $ipv4_pageviews (no IP keys to analyze)"
-                echo "  - IPv6 Pageviews: $ipv6_pageviews (no IP keys found)"
+                echo "  - IPv4 Pageviews: $ipv4_pageviews (no data to analyze IPv6)"
+                echo "  - IPv6 Pageviews: $ipv6_pageviews (no data to analyze)"
               else
-                echo "  - No pageviews extracted and no existing IP keys found"
-                echo "  - This might be the first run or data needs to be extracted"
+                echo "  - No pageviews extracted and no recent data for analysis"
               fi
             fi
           else
