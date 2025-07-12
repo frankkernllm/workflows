@@ -81,11 +81,11 @@ jobs:
           echo "  - Total Pageviews: $pageviews"
           echo "  - Extraction Complete: $extraction_complete"
           
-          # SIMPLE IPv6 FIX: Use Redis scanner to analyze IP distribution
-          if [ "$success" = "true" ] && [ "$pageviews" -gt 0 ]; then
-            echo "🔍 Analyzing IPv4/IPv6 distribution..."
+          # SIMPLE IPv6 FIX: Always analyze existing data, even if no new pageviews extracted
+          if [ "$success" = "true" ]; then
+            echo "🔍 Analyzing existing IPv4/IPv6 distribution..."
             
-            # Use attribution-data-scanner to check for IPv6 patterns
+            # Use attribution-data-scanner to check for IPv6 patterns in existing data
             scanner_response=$(curl -s "${{ env.NETLIFY_URL }}/.netlify/functions/attribution-data-scanner" \
               -H "X-API-Key: ${{ env.OJOY_API_KEY }}")
             
@@ -120,23 +120,37 @@ jobs:
                 ipv6_percentage=0
               fi
               
-              # Apply percentage to extracted pageviews
-              ipv6_pageviews=$((pageviews * ipv6_percentage / 100))
-              ipv4_pageviews=$((pageviews - ipv6_pageviews))
+              # If pageviews were extracted this run, apply percentage
+              if [ "$pageviews" -gt 0 ]; then
+                ipv6_pageviews=$((pageviews * ipv6_percentage / 100))
+                ipv4_pageviews=$((pageviews - ipv6_pageviews))
+                echo "  - IPv4 Pageviews (this extraction): $ipv4_pageviews"
+                echo "  - IPv6 Pageviews (this extraction): $ipv6_pageviews"
+              else
+                # No new pageviews extracted, but we can report existing distribution
+                ipv4_pageviews=0
+                ipv6_pageviews=0
+                echo "  - No new pageviews extracted this run (normal if recently run)"
+                echo "  - Existing data shows IPv6 adoption: ${ipv6_percentage}%"
+              fi
               
-              echo "  - IPv4 Pageviews (estimated): $ipv4_pageviews"
-              echo "  - IPv6 Pageviews (estimated): $ipv6_pageviews"
-              echo "  - IPv6 Adoption Rate: ${ipv6_percentage}%"
+              echo "  - IPv6 Adoption Rate in existing data: ${ipv6_percentage}%"
               echo "  - Sample analyzed: $total_sample keys (IPv6-like: $ipv6_like_count, IPv4-like: $ipv4_like_count)"
+              echo "  - Total IP keys in database: $total_ip_keys"
             else
-              # Fallback: assume all IPv4 if we can't analyze
+              # No IP keys found at all
               ipv4_pageviews=$pageviews
               ipv6_pageviews=0
-              echo "  - IPv4 Pageviews: $ipv4_pageviews (default)"
-              echo "  - IPv6 Pageviews: $ipv6_pageviews (none detected)"
+              if [ "$pageviews" -gt 0 ]; then
+                echo "  - IPv4 Pageviews: $ipv4_pageviews (no IP keys to analyze)"
+                echo "  - IPv6 Pageviews: $ipv6_pageviews (no IP keys found)"
+              else
+                echo "  - No pageviews extracted and no existing IP keys found"
+                echo "  - This might be the first run or data needs to be extracted"
+              fi
             fi
           else
-            echo "❌ Extraction failed or no pageviews found"
+            echo "❌ Extraction failed"
             ipv4_pageviews=0
             ipv6_pageviews=0
             extraction_complete=false
@@ -149,7 +163,11 @@ jobs:
           echo "ipv6_pageviews=$ipv6_pageviews" >> $GITHUB_OUTPUT
           
           if [ "$success" = "true" ]; then
-            echo "✅ SIMPLE FIX: Extraction completed with IPv4/IPv6 analysis!"
+            if [ "$pageviews" -gt 0 ]; then
+              echo "✅ SIMPLE FIX: Extraction completed with $pageviews new pageviews and IPv4/IPv6 analysis!"
+            else
+              echo "✅ SIMPLE FIX: Extraction completed successfully (no new pageviews to extract - normal if recently run)"
+            fi
           else
             echo "❌ Extraction failed"
             exit 1
